@@ -1,0 +1,84 @@
+#!/bin/busybox sh
+
+# Colors
+COL_RED='\033[0;31m'
+COL_GRN='\033[0;32m'
+COL_YEL='\033[1;33m'
+COL_BLU='\033[0;34m'
+COL_PUR='\033[0;35m'
+COL_CYN='\033[0;36m'
+COL_RST='\033[0m'
+
+fail() {
+    echo -e "${COL_RED}$1${COL_RST}"
+}
+
+# Install symlinks to utilities.
+/bin/busybox --install -s
+
+# Mount system filesystems.
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mount -t tmpfs tmpfs /run
+
+# Placeholder for UUID of the LUKS device to be automatically replaced.
+CRYPT_UUID="SLOT_FOR_CRYPT_UUID"
+# Root device.
+ROOT_DEV=$(findfs UUID="$CRYPT_UUID" 2>/dev/null)
+# Name of the root device.
+CRYPT_ROOT="cryptroot"
+# Root flags for kernel.
+ROOT_FLAGS="subvol=@,compress=zstd,noatime"
+# Device to look for the resume image on.
+RESUME_DEV=/dev/mapper/cryptroot
+# Resume offsite within the swap file.
+RESUME_OFF=533760
+
+KBD_LED_MAX_FILE=/sys/class/leds/kbd_backlight/max_brightness
+KBD_LED_VAL_FILE=/sys/class/leds/kbd_backlight/brightness
+DISPLAY_MAX_FILE=/sys/class/backlight/intel_backlight/max_brightness
+DISPLAY_VAL_FILE=/sys/class/backlight/intel_backlight/brightness
+
+[ -f "$KBD_LED_MAX_FILE" ] && [ -f "$KBD_LED_VAL_FILE" ] && expr $(cat "$KBD_LED_MAX_FILE") / 2     >"$KBD_LED_VAL_FILE"
+[ -f "$DISPLAY_MAX_FILE" ] && [ -f "$DISPLAY_VAL_FILE" ] && expr $(cat "$DISPLAY_MAX_FILE") / 10    >"$DISPLAY_VAL_FILE"
+
+# Use the gamma application to set the display temperature to 3000K.
+gamma || true
+
+if ! cryptsetup luksOpen "$ROOT_DEV" "$CRYPT_ROOT"; then
+    if ! cryptsetup luksOpen "$ROOT_DEV" "$CRYPT_ROOT"; then
+        if ! cryptsetup luksOpen "$ROOT_DEV" "$CRYPT_ROOT"; then
+            fail "ERROR: Decryption failed! Dropping to rescue shell..."
+            setsid cttyhack sh
+            reboot -f
+        fi
+    fi
+fi
+
+# Add a newline after successfully processing the password.
+echo ""
+
+if [ -e /sys/power/resume ]; then
+    # Set the offset for resume (associated with the identified device).
+    echo "$RESUME_OFF" > /sys/power/resume_offset
+
+    # Trigger the resume by writing again.
+    printf "%d:%d" $(stat -c "0x%t 0x%T" "$RESUME_DEV") > /sys/power/resume
+fi
+
+# Mount root and switch.
+if ! mount -t btrfs -o "$ROOT_FLAGS" "/dev/mapper/$CRYPT_ROOT" /mnt; then
+    fail "ERROR: Mounting root filesystem failed! Dropping to rescue shell..."
+    setsid cttyhack sh
+    reboot -f
+fi
+
+# Unmount or move devices
+mount --move /dev /mnt/dev
+mount --move /run /mnt/run
+umount /proc
+umount /sys
+
+# Switching to the real root filesystem.
+exec switch_root /mnt /sbin/init
